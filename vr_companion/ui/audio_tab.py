@@ -1,9 +1,9 @@
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QHBoxLayout, QLabel, QLineEdit, QPushButton, QVBoxLayout, QWidget
+    QCheckBox, QComboBox, QHBoxLayout, QLabel, QLineEdit, QPushButton, QSlider, QVBoxLayout, QWidget
 )
 
-from ..audio.noise import VOLUME_PRESETS
+from ..audio.noise import VOLUME_MAX_PCT
 
 
 class AudioTab(QWidget):
@@ -22,16 +22,27 @@ class AudioTab(QWidget):
 
         vol_row = QHBoxLayout()
         vol_row.addWidget(QLabel("Volume:"))
-        self.vol_combo = QComboBox()
-        for p in VOLUME_PRESETS:
-            self.vol_combo.addItem(f"{p}%", p)
-        current_pct = cfg["audio"]["volume_pct"]
-        idx = self.vol_combo.findData(current_pct)
-        self.vol_combo.setCurrentIndex(idx if idx >= 0 else 0)
-        self.vol_combo.currentIndexChanged.connect(self._on_volume_changed)
-        vol_row.addWidget(self.vol_combo)
-        vol_row.addStretch(1)
+        self.vol_slider = QSlider(Qt.Horizontal)
+        self.vol_slider.setRange(0, VOLUME_MAX_PCT)
+        self.vol_slider.setSingleStep(1)
+        self.vol_slider.setPageStep(5)
+        self.vol_slider.setTickPosition(QSlider.TicksBelow)
+        self.vol_slider.setTickInterval(5)
+        self.vol_slider.setValue(min(int(cfg["audio"]["volume_pct"]), VOLUME_MAX_PCT))
+        self.vol_slider.valueChanged.connect(self._on_volume_changed)
+        vol_row.addWidget(self.vol_slider, stretch=1)
+        self.vol_value_label = QLabel()
+        self.vol_value_label.setMinimumWidth(40)
+        vol_row.addWidget(self.vol_value_label)
         layout.addLayout(vol_row)
+        self._update_volume_label(self.vol_slider.value())
+
+        # Apply volume live while dragging, but only write the config file
+        # once the value has settled.
+        self._save_timer = QTimer(self)
+        self._save_timer.setSingleShot(True)
+        self._save_timer.setInterval(500)
+        self._save_timer.timeout.connect(lambda: self.save_cfg(self.cfg))
 
         dev_row = QHBoxLayout()
         dev_row.addWidget(QLabel("Output device match:"))
@@ -60,11 +71,14 @@ class AudioTab(QWidget):
         self.cfg["audio"]["enabled"] = checked
         self.save_cfg(self.cfg)
 
-    def _on_volume_changed(self, idx):
-        pct = self.vol_combo.itemData(idx)
+    def _update_volume_label(self, pct):
+        self.vol_value_label.setText(f"{pct}%")
+
+    def _on_volume_changed(self, pct):
+        self._update_volume_label(pct)
         self.engine.volume_pct = pct
         self.cfg["audio"]["volume_pct"] = pct
-        self.save_cfg(self.cfg)
+        self._save_timer.start()
 
     def _on_device_edited(self):
         match = self.device_edit.text()

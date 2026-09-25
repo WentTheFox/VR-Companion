@@ -1,4 +1,5 @@
 import sys
+from pathlib import Path
 
 from PySide6.QtGui import QAction, QIcon, QPixmap, QPainter, QColor
 from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon
@@ -7,6 +8,8 @@ from .audio.engine import NoiseEngine
 from .config import load_config, save_config
 from .ui.devices_tab import vr_app_clients
 from .ui.main_window import MainWindow
+
+ICON_PATH = Path(__file__).parent / "assets" / "icon.svg"
 
 
 def make_tray_icon() -> QIcon:
@@ -22,6 +25,11 @@ def make_tray_icon() -> QIcon:
 
 def main():
     app = QApplication(sys.argv)
+    app.setApplicationName("VR Companion")
+    # Wayland app_id: lets the desktop match windows to vr-companion.desktop
+    # (taskbar icon/grouping) instead of showing a generic "python3".
+    app.setDesktopFileName("vr-companion")
+    app.setWindowIcon(QIcon(str(ICON_PATH)))
     app.setQuitOnLastWindowClosed(False)
 
     cfg = load_config()
@@ -32,6 +40,7 @@ def main():
     engine.enabled = cfg["audio"]["enabled"]
 
     window = MainWindow(engine, cfg, save_config)
+    engine.start_ticker()
 
     tray = QSystemTrayIcon(make_tray_icon(), app)
     tray.setToolTip("VR Companion")
@@ -55,6 +64,7 @@ def main():
             window.raise_()
             if QMessageBox.question(window, "Quit VR Companion", msg + "\n\nQuit anyway?") != QMessageBox.Yes:
                 return
+        window.shutdown()
         engine.shutdown()
         app.quit()
 

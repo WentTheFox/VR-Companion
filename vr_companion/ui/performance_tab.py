@@ -202,7 +202,7 @@ class PerformanceTab(QWidget):
             self.tailer = None
             self._show_message(
                 "No frame timing log yet.\n\n"
-                f"Use \"Restart service\" on the Devices tab so {self.adapter.name} is "
+                f"Use \"Start service\" / \"Restart service\" on the Devices tab so {self.adapter.name} is "
                 "launched by VR Companion with live stats logging enabled."
             )
             return

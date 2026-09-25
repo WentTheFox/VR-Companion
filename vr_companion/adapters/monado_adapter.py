@@ -7,6 +7,7 @@ works whether Monado was started by Envision, a systemd unit, or by hand.
 import ctypes
 import ctypes.util
 import os
+import re
 import signal
 import subprocess
 import time
@@ -47,6 +48,40 @@ VALVE_USB_VENDOR = "28de"
 INDEX_HMD_USB_PRODUCT = "2300"
 
 
+def _edid_manufacturer(edid: bytes):
+    """3-letter PNP ID from EDID bytes 8-9 (e.g. "VLV"), or None."""
+    if len(edid) < 128 or edid[:8] != bytes.fromhex("00ffffffffffff00"):
+        return None
+    m = (edid[8] << 8) | edid[9]
+    return "".join(chr(((m >> shift) & 0x1F) + 64) for shift in (10, 5, 0))
+
+
+def _headset_display_state(root=Path("/sys/class/drm")):
+    """Linux-only look at connected DRM outputs' EDIDs:
+    "ok" -- some output reports Valve's "VLV" EDID (the Index display);
+    "fallback" -- none does, but one has the NVIDIA driver's blank fallback
+        EDID ("NVD", product 0, 640x480 only): the headset's real EDID read
+        failed at power-up. Seen live 2026-09-25; a DP replug didn't fix it,
+        power-cycling the headset did. Monado then can't find the display;
+    None -- neither / can't tell (no sysfs, e.g. Windows)."""
+    if not root.is_dir():
+        return None
+    fallback = False
+    for conn in root.glob("card*-*"):
+        try:
+            if (conn / "status").read_text().strip() != "connected":
+                continue
+            edid = (conn / "edid").read_bytes()
+        except OSError:
+            continue
+        mfg = _edid_manufacturer(edid)
+        if mfg == "VLV":
+            return "ok"
+        if mfg == "NVD" and edid[10:12] == b"\0\0":
+            fallback = True
+    return "fallback" if fallback else None
+
+
 def _index_hmd_on_usb():
     """True/False on Linux (via sysfs), None where that can't be checked."""
     root = Path("/sys/bus/usb/devices")
@@ -62,29 +97,58 @@ def _index_hmd_on_usb():
     return False
 
 
-class _LateDeviceCounter:
-    """Incrementally counts LATE_DEVICE_WARNING lines in the service log."""
+# Service log markers for lighthouse startup (steamvr_lh.cpp).
+DISCOVERY_START = "Lighthouse initialization complete"
+DISCOVERY_END = "Device search time complete"
+FOUND_DEVICE = re.compile(r"Found lighthouse (HMD|controller|tracker|base station): (\S+)")
+FOUND_KINDS = {
+    "HMD": DeviceKind.HMD,
+    "controller": DeviceKind.CONTROLLER,
+    "tracker": DeviceKind.TRACKER,
+    "base station": DeviceKind.BASE_STATION,
+}
+PHASE_STARTING, PHASE_DISCOVERING, PHASE_DONE = "starting", "discovering", "done"
+KIND_NAMES = {
+    DeviceKind.HMD: "Headset",
+    DeviceKind.CONTROLLER: "Controller",
+    DeviceKind.TRACKER: "Tracker",
+    DeviceKind.BASE_STATION: "Base station",
+}
+
+
+class _ServiceLogScanner:
+    """Incrementally follows the service log we launched monado-service
+    with: startup phase, devices found during lighthouse discovery, and
+    LATE_DEVICE_WARNING lines."""
 
     def __init__(self):
+        self._fh = None
         self.reset()
 
     def reset(self):
+        if self._fh:
+            self._fh.close()
         self._fh = None
         self._inode = None
-        self.count = 0
+        self._clear()
 
-    def poll(self, path) -> int:
+    def _clear(self):
+        self.phase = PHASE_STARTING
+        self.found = {}   # serial -> DeviceKind, in discovery order
+        self.late = 0
+
+    def poll(self, path):
         try:
             st = os.stat(path)
         except FileNotFoundError:
             self.reset()
-            return 0
+            return
         if self._fh is None or self._inode != st.st_ino or st.st_size < self._fh.tell():
             if self._fh:
                 self._fh.close()
             self._fh = open(path, "r", errors="replace")
             self._inode = st.st_ino
-            self.count = 0
+            self._clear()
         while True:
             pos = self._fh.tell()
             line = self._fh.readline()
@@ -94,8 +158,15 @@ class _LateDeviceCounter:
                 self._fh.seek(pos)
                 break
             if LATE_DEVICE_WARNING in line:
-                self.count += 1
-        return self.count
+                self.late += 1
+            elif DISCOVERY_END in line:
+                self.phase = PHASE_DONE
+            elif DISCOVERY_START in line and self.phase == PHASE_STARTING:
+                self.phase = PHASE_DISCOVERING
+            else:
+                m = FOUND_DEVICE.search(line)
+                if m:
+                    self.found[m.group(2)] = FOUND_KINDS[m.group(1)]
 
 
 # --- mnd_property_t ---
@@ -138,7 +209,7 @@ class MonadoAdapter(VRAdapter):
         self._lib = None
         self._root = None
         self._options = {"lh_discover_wait_ms": LH_DISCOVER_WAIT_DEFAULT_MS}
-        self._late_devices = _LateDeviceCounter()
+        self._log = _ServiceLogScanner()
 
     def is_available(self) -> bool:
         return ctypes.util.find_library("monado") is not None or self._try_load()
@@ -176,6 +247,8 @@ class MonadoAdapter(VRAdapter):
         lib.mnd_root_get_device_count.restype = c_int32
         lib.mnd_root_get_device_info.argtypes = [ctypes.c_void_p, c_uint32, POINTER(c_uint32), POINTER(c_char_p)]
         lib.mnd_root_get_device_info.restype = c_int32
+        lib.mnd_root_get_device_info_string.argtypes = [ctypes.c_void_p, c_uint32, c_int32, POINTER(c_char_p)]
+        lib.mnd_root_get_device_info_string.restype = c_int32
         lib.mnd_root_get_device_from_role.argtypes = [ctypes.c_void_p, c_char_p, POINTER(c_int32)]
         lib.mnd_root_get_device_from_role.restype = c_int32
         lib.mnd_root_get_device_battery_status.argtypes = [
@@ -212,8 +285,12 @@ class MonadoAdapter(VRAdapter):
 
     def poll(self) -> BackendSnapshot:
         if self._root is None:
+            starting = self._startup_snapshot()
+            if starting is not None:
+                return starting
             if not self.connect():
-                return BackendSnapshot(self.name, connected=False, error="No Monado service running")
+                return BackendSnapshot(self.name, connected=False, error="No Monado service running",
+                                       warnings=self._display_warnings())
 
         lib, root = self._lib, self._root
         try:
@@ -229,6 +306,12 @@ class MonadoAdapter(VRAdapter):
                     continue
                 name = (name_ptr.value or b"").decode(errors="replace")
                 role = role_map.get(i)
+                serial_ptr = c_char_p()
+                serial = None
+                if lib.mnd_root_get_device_info_string(
+                    root, i, MND_PROPERTY_SERIAL_STRING, byref(serial_ptr)
+                ) == 0 and serial_ptr.value:
+                    serial = serial_ptr.value.decode(errors="replace")
 
                 present = c_bool(False)
                 charging = c_bool(False)
@@ -245,6 +328,7 @@ class MonadoAdapter(VRAdapter):
                     battery_percent=(charge.value * 100.0) if battery_ok else None,
                     charging=charging.value if battery_ok else None,
                     role=role,
+                    serial=serial,
                 ))
 
             lib.mnd_root_update_client_list(root)
@@ -276,8 +360,20 @@ class MonadoAdapter(VRAdapter):
             self._root = None
             return BackendSnapshot(self.name, connected=False, error=str(e))
 
+    def _display_warnings(self) -> list:
+        # Only meaningful while the headset is actually on: a powered-off
+        # Index has no display attached at all.
+        if _index_hmd_on_usb() is False or _headset_display_state() != "fallback":
+            return []
+        return [
+            "The headset's display wasn't recognised: it came up with a blank placeholder "
+            "EDID (\"NVD\", 640x480) instead of the Index's own, so Monado can't drive it. "
+            "Power-cycle the headset (link box) -- a DisplayPort replug isn't enough -- "
+            "then (re)start the service."
+        ]
+
     def _warnings(self, devices, late) -> list:
-        out = []
+        out = self._display_warnings()
         if any(d.role == "head" and d.name == SIMULATED_HMD_NAME for d in devices):
             msg = ("Monado didn't find your headset and is using a simulated HMD instead, "
                    "so no real devices (controllers included) will show up.")
@@ -293,12 +389,59 @@ class MonadoAdapter(VRAdapter):
                        "Increase the lighthouse discovery wait and restart the service.")
         return out
 
+    def _startup_snapshot(self):
+        """While the service we launched is still starting up, a snapshot of
+        placeholder rows built from its log -- or None once it's past
+        lighthouse discovery (or isn't ours), meaning: go connect.
+
+        Connecting before then is pointless: libmonado can't talk to the
+        service until it has finished creating its devices, and a connect
+        attempt may sit blocked until it does."""
+        if not self.owns_running_service():
+            return None
+        self._log.poll(SERVICE_LOG_PATH)
+        if self._log.phase == PHASE_DONE:
+            return None
+
+        wait_ms = self._options["lh_discover_wait_ms"]
+        if self._log.phase == PHASE_STARTING:
+            status = "Starting Monado service..."
+        else:
+            status = f"Discovering lighthouse devices (at least {wait_ms / 1000:g} s)..."
+        devices = [
+            DeviceStatus(
+                id=f"found-{serial}",
+                name=f"{KIND_NAMES[kind]} (setting up...)",
+                kind=kind,
+                serial=serial,
+                placeholder=True,
+                placeholder_status="Found",
+                note="Found during lighthouse discovery; Monado is still setting it up.",
+            )
+            for serial, kind in self._log.found.items()
+        ]
+        devices.append(DeviceStatus(
+            id="discovering",
+            name="Searching for devices...",
+            kind=DeviceKind.OTHER,
+            placeholder=True,
+            placeholder_status="Discovering",
+            note=(
+                "Monado is waiting for lighthouse devices to report in. Devices that "
+                "only show up after this window closes won't be added until the next "
+                f"restart (lighthouse discovery wait: {wait_ms} ms)."
+            ),
+        ))
+        return BackendSnapshot(self.name, connected=False, devices=devices, busy=status,
+                               warnings=self._display_warnings())
+
     def _late_device_placeholders(self) -> list:
         # Only our own service's log describes the running service; if it
         # was started some other way, that file is from an older run.
         if not self.owns_running_service():
             return []
-        n = self._late_devices.poll(SERVICE_LOG_PATH)
+        self._log.poll(SERVICE_LOG_PATH)
+        n = self._log.late
         return [
             DeviceStatus(
                 id=f"late-{i}",
@@ -306,6 +449,7 @@ class MonadoAdapter(VRAdapter):
                 kind=DeviceKind.OTHER,
                 tracking_ok=False,
                 placeholder=True,
+                placeholder_status="Not added",
                 note=(
                     "Monado saw this device but it arrived after lighthouse discovery "
                     "had finished (or was powered on after the service started), so it "
@@ -409,7 +553,7 @@ class MonadoAdapter(VRAdapter):
 
         # The log is about to be truncated; the new one may outgrow our old
         # read offset before the next poll, so don't rely on noticing that.
-        self._late_devices.reset()
+        self._log.reset()
         try:
             log_f = open(SERVICE_LOG_PATH, "w")
             # stdin=PIPE (left open, never written to) rather than DEVNULL --
@@ -426,6 +570,9 @@ class MonadoAdapter(VRAdapter):
             print(f"vr-companion: failed to launch monado-service: {e}")
             return False
         return True
+
+    def is_service_running(self) -> bool:
+        return self._find_running_pid() is not None
 
     def owns_running_service(self) -> bool:
         # Our child's stdin is a pipe held by this process; monado-service

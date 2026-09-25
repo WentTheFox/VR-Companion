@@ -22,9 +22,11 @@ class DeviceStatus:
     battery_percent: Optional[float] = None  # 0-100, None = unsupported/no data
     charging: Optional[bool] = None
     role: Optional[str] = None               # "head", "left", "right", etc.
+    serial: Optional[str] = None             # hardware serial, e.g. "LHR-41D1A8D0"
     # A device the backend saw but couldn't add (identity unknown) -- shown
     # as a placeholder row so it isn't silently missing from the list.
     placeholder: bool = False
+    placeholder_status: Optional[str] = None   # shown in the Tracking column, e.g. "Not added"
     note: Optional[str] = None
 
 
@@ -60,6 +62,9 @@ class BackendSnapshot:
     # Non-fatal problems worth surfacing (e.g. "fell back to a simulated
     # headset"), shown above the device table.
     warnings: list = field(default_factory=list)   # list[str]
+    # Set while the backend is still coming up (not an error): shown as a
+    # neutral progress message instead of `error`.
+    busy: Optional[str] = None
 
 
 class VRAdapter:
@@ -105,6 +110,11 @@ class VRAdapter:
 
     def set_service_option(self, key: str, value: int):
         """Takes effect on the next restart_service()."""
+
+    def is_service_running(self) -> bool:
+        """Whether the backend's service process is running at all (however
+        it was started). Only meaningful if supports_service_restart()."""
+        return False
 
     def owns_running_service(self) -> bool:
         """Whether the backend's service is currently running as a child of

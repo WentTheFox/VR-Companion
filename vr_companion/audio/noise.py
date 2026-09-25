@@ -9,9 +9,9 @@ import numpy as np
 
 MIN_DB = -50.0
 
-# Concentrated below 50% -- above that it's just loud static, not useful for
-# a background masking noise.
-VOLUME_PRESETS = [1, 2, 3, 4, 5, 7, 9, 11, 14, 17, 20, 25, 30, 40, 50]
+# Slider ceiling: above 50% it's just loud static, not useful for a
+# background masking noise.
+VOLUME_MAX_PCT = 50
 
 
 def pct_to_gain(pct: float) -> float:

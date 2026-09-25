@@ -140,6 +140,35 @@ testing feedback in the same session; pick this back up fresh here.
 - A late *base station* still yields a placeholder row, but once added it
   doesn't appear in the table (libmonado doesn't expose base stations), so
   the row count can shrink after a fix.
+- **Startup/discovery placeholders:** while the service *we* launched is
+  still starting, `MonadoAdapter.poll()` doesn't connect (libmonado can't
+  talk to it until device creation is done, and may block trying) and
+  instead returns placeholder rows parsed from its log by
+  `_ServiceLogScanner`: phase markers "Lighthouse initialization complete"
+  -> "Device search time complete", plus each "Found lighthouse <kind>:
+  <serial>" line. `BackendSnapshot.busy` carries the neutral status text.
+- **Body roles can be imported from SteamVR** ("Import body roles from
+  SteamVR..." button; `roles.find_steamvr_settings()` checks the local
+  Steam install and `<drive>/Program Files (x86)/Steam/config/` under
+  `/mnt/*` and `/run/media/*/*`). Import is one-shot into
+  `cfg["device_roles"]`, never a live link -- the user wanted in-app
+  assignment persisted locally by serial. Must happen inside the app: it
+  holds cfg in memory and would overwrite external edits on its next save.
+- **Headset display seen as plain "NVIDIA" (DP-4)** on one 2026-09-25 run
+  instead of "Valve Corporation Index HMD": Monado's NVIDIA allowlist
+  didn't match, so no direct mode ("Found no connectors available for
+  direct mode") and swapchain errors. The connector had the NVIDIA
+  driver's blank fallback EDID ("NVD", product 0, 640x480 only). A DP
+  replug did NOT fix it (real hotplug events, still blank); **power-cycling
+  the headset did** (then "VLV" "Index HMD", 2880x1600). No software reset
+  exists for the Index display (Monado's HID power report is Vive/Vive
+  Pro-only; lighthouse_console "reboot" looks like ISP/bootloader mode --
+  don't). `MonadoAdapter` warns on this (`_headset_display_state()`, sysfs
+  EDIDs), also before the service starts. **Boundary decided with the
+  user:** VR Companion only detects/warns and must not drive Home
+  Assistant; the user's vr-ha-agent session was asked to expose the display
+  state as an HA sensor so an HA automation can cycle the link box's smart
+  plug. NVIDIA write-up: the user's "SteamVR setup" session.
 - **"Simulated HMD" = Monado didn't find the headset.** With no Index on
   USB, no builder claims a head device and Monado silently falls back to
   the "legacy" builder's Simulated HMD -- no lighthouse driver, so no
@@ -151,6 +180,24 @@ testing feedback in the same session; pick this back up fresh here.
   Devices table alongside the late-device warning. Coincided with a
   monado-git r844 -> r849 upgrade at 14:27, but the USB drop was 16s
   *earlier* and none of those 5 commits touch builders/steamvr_lh.
+- **Tracker body roles (waist/feet/...) aren't consumed by anything on
+  Linux** (checked 2026-09-25 against current upstream): libmonado only
+  *reports* head/left/right/gamepad/eyes roles and has no setter; Monado's
+  `XR_HTCX_vive_tracker_interaction` is `ALWAYS_DISABLED`
+  (`oxr_extension_support.py`); xrizer (0989a7f = upstream HEAD) exposes all
+  trackers as generic `vive_tracker_handheld_object` and its IVRSettings is
+  a stub; Monado's new built-in OpenVR state tracker (MR 2862) is also
+  role-less. VRChat doesn't need roles (calibration assigns by position).
+  So the Devices tab's "Body role" column (trackers only; `roles.py`, saved per serial in
+  `cfg["device_roles"]`, keyed by SteamVR's `TrackerRole_*` names) is
+  informational for now. Getting roles to games would mean patching xrizer
+  to read that mapping and report e.g. `vive_tracker_waist`.
+  The user's Windows roles live in
+  `/mnt/c/Program Files (x86)/Steam/config/steamvr.vrsettings` ("trackers"
+  section, e.g. `LHR-92DD1F67` = Waist); the user chose to assign in-app
+  rather than import. `XRIZER_TRACKER_SERIALS` (`;`-separated serials) is
+  xrizer's only tracker knob: it makes any device (e.g. a controller) a
+  generic tracker, and must be in the *game's* env, not monado-service's.
 - `/proc/<pid>/environ` of `monado-service` isn't readable (it runs with
   extra capabilities for its realtime threads) -- verify env effects via
   its log instead.
@@ -191,6 +238,16 @@ testing feedback in the same session; pick this back up fresh here.
   than parsing plain-text `pactl list` output.
 
 ## Design decisions already made with the user (don't re-litigate)
+
+- **Nothing blocking runs on the UI thread.** All adapter calls (poll,
+  is_service_running, restart, disconnect) go through `AdapterWorker` on
+  DevicesTab's single QThread via queued signals -- which also serialises
+  polls against restarts. The audio engine ticks on its own thread
+  (`NoiseEngine.start_ticker()`). Reason: the user saw the whole app freeze
+  briefly right after "Start service" (libmonado blocks while the new
+  service initialises; the engine's pactl/PortAudio work also ran on the UI
+  thread). `MainWindow` has a heartbeat watchdog printing
+  "UI thread stalled for N ms" to stdout if this ever regresses.
 
 - **VR Companion owns `monado-service`'s lifetime.** A service started by
   `restart_service()` gets its stdin from a pipe held by this process, and

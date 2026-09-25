@@ -13,6 +13,8 @@ DEFAULTS = {
     "backend": "monado",
     # backend key -> {ServiceOption.key: value}
     "service_options": {},
+    # device serial -> SteamVR TrackerRole_* key (see roles.py)
+    "device_roles": {},
 }
 
 

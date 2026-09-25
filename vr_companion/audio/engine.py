@@ -79,6 +79,8 @@ class NoiseEngine:
         self.stream = None
         self.current_target = None
         self._lock = threading.Lock()
+        self._ticker = None
+        self._ticker_stop = threading.Event()
 
     # ---- device discovery ----
 
@@ -173,10 +175,27 @@ class NoiseEngine:
             self._stop_stream_locked()
 
     def shutdown(self):
+        self._ticker_stop.set()
+        if self._ticker is not None:
+            self._ticker.join(timeout=5)
         self.stop()
         self.pa.terminate()
 
-    # ---- called from a Qt timer, not a background loop ----
+    # ---- background presence polling ----
+
+    def start_ticker(self, interval_s=2.0):
+        """Run tick() every interval_s on a background thread. It shells out
+        to pactl and opens PortAudio streams, which must not stall the UI."""
+        def loop():
+            while True:
+                try:
+                    self.tick()
+                except Exception as e:
+                    print(f"vr-companion audio: tick failed: {e}")
+                if self._ticker_stop.wait(interval_s):
+                    return
+        self._ticker = threading.Thread(target=loop, name="noise-engine-tick", daemon=True)
+        self._ticker.start()
 
     def tick(self) -> bool:
         """Check device presence and (re)start/stop as needed.
