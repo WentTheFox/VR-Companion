@@ -11,6 +11,8 @@ DEFAULTS = {
         "enabled": True,
     },
     "backend": "monado",
+    # backend key -> {ServiceOption.key: value}
+    "service_options": {},
 }
 
 

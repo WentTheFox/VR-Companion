@@ -42,7 +42,7 @@ testing feedback in the same session; pick this back up fresh here.
     on/off fix. Don't expect a config to make it truly zero.
 - `vr_companion/config.py` -- config at `~/.config/vr-companion/config.json`.
   User's tuned values were migrated in from the old standalone app's config
-  (`~/.config/vr-noise-mask/config.json`, now unused/stoppable).
+  (`~/.config/vr-noise-mask/config.json`, since deleted).
 - `vr_companion/ui/` -- `DevicesTab` (live table + backend picker) and
   `AudioTab` (volume presets, device-match field, candidate picker) both
   built and confirmed rendering/working live via
@@ -102,11 +102,9 @@ testing feedback in the same session; pick this back up fresh here.
    `python3 -m vr_companion.app` from the repo root
    (`~/git/WentTheFox/VR-Companion`; the old `~/.local/share/vr-companion`
    location no longer exists), start a VR app, then check both.
-5. Retire the old standalone app: its config was confirmed identical to
-   the migrated one and nothing references it (no autostart/systemd/
-   .desktop entry), but deleting it was blocked by Claude Code's auto-mode
-   permission check -- the user needs to run
-   `rm -r ~/.local/share/vr-noise-mask ~/.config/vr-noise-mask` themselves.
+5. ~~Retire the old standalone app~~ -- done 2026-09-25: config confirmed
+   identical to the migrated one, then `~/.local/share/vr-noise-mask` and
+   `~/.config/vr-noise-mask` deleted by the user.
 6. ~~systemd autostart~~ -- dropped: the user is happy for the companion
    app to own `monado-service` (see Design decisions), so there's no
    separate always-running service to autostart.
@@ -126,10 +124,25 @@ testing feedback in the same session; pick this back up fresh here.
 - Base stations are found by Monado (visible in the service log) but are
   not exposed as devices through libmonado, so they never appear in the
   Devices table.
-- Seen once live: `Cannot add device after setup; consider increasing
-  LH_DISCOVER_WAIT_MS` -- one lighthouse device showed up after the
-  discovery window (4 Watchman dongles, only 2 controllers). Unknown which;
-  if a tracker goes missing, try setting that var in `restart_service()`.
+- **Late lighthouse devices** (`Cannot add device after setup; consider
+  increasing LH_DISCOVER_WAIT_MS`): steamvr_lh drops any device arriving
+  after its discovery window (default 3000 ms, `steamvr_lh.cpp`), and also
+  any powered on after the service started -- and logs *no* serial/class
+  for it, so it can't be identified. `MonadoAdapter` counts these warnings
+  in its own service log and appends placeholder `DeviceStatus` rows
+  (`placeholder=True`); only when `owns_running_service()`, since otherwise
+  that log is from an older run. The wait is user-settable in the Devices
+  tab (generic `service_options()` hook, saved under
+  `cfg["service_options"][backend]`, applied as `LH_DISCOVER_WAIT_MS` on
+  restart). Verified live: 500 ms -> only the HMD added, 5 placeholders;
+  6000 ms -> everything, including a **third base station
+  `LHB-BC26C101`** that the 3000 ms default missed.
+- A late *base station* still yields a placeholder row, but once added it
+  doesn't appear in the table (libmonado doesn't expose base stations), so
+  the row count can shrink after a fix.
+- `/proc/<pid>/environ` of `monado-service` isn't readable (it runs with
+  extra capabilities for its realtime threads) -- verify env effects via
+  its log instead.
 
 - **Never open the raw ALSA hw device for the headset directly** (e.g.
   `hw:NVidia,7`, which is what PortAudio's device enumeration calls

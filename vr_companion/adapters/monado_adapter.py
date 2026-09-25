@@ -13,7 +13,7 @@ import time
 from ctypes import c_bool, c_char_p, c_float, c_int32, c_uint32, POINTER, byref
 from pathlib import Path
 
-from .base import BackendSnapshot, ClientStatus, DeviceKind, DeviceStatus, VRAdapter
+from .base import BackendSnapshot, ClientStatus, DeviceKind, DeviceStatus, ServiceOption, VRAdapter
 
 STATE_DIR = Path.home() / ".local" / "state" / "vr-companion"
 SERVICE_LOG_PATH = STATE_DIR / "monado-service.log"
@@ -27,10 +27,54 @@ PIDFILE_PATH = RUNTIME_DIR / "monado.pid"
 # NVIDIA-specific compositor latency issue, and U_PACING_LIVE_STATS feeds
 # the performance graph. Deliberately NOT included: XRT_COMPOSITOR_DESIRED_MODE
 # and U_PACING_COMP_TIME_FRACTION_PERCENT, which we validated cause more harm
-# (ghosting/lag) than the tearing they were meant to fix.
+# (ghosting/lag) than the tearing they were meant to fix. LH_DISCOVER_WAIT_MS is
+# user-set from the Devices tab (see service_options()).
 def _default_steamvr_path():
     p = Path.home() / ".local" / "share" / "Steam" / "steamapps" / "common" / "SteamVR"
     return str(p) if p.exists() else None
+
+# steamvr_lh drops any device that shows up after its discovery window
+# (LH_DISCOVER_WAIT_MS, default 3000) -- including one powered on after the
+# service started -- and logs only this, with no serial or device class.
+LATE_DEVICE_WARNING = "Cannot add device after setup"
+LH_DISCOVER_WAIT_DEFAULT_MS = 3000
+
+
+class _LateDeviceCounter:
+    """Incrementally counts LATE_DEVICE_WARNING lines in the service log."""
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self._fh = None
+        self._inode = None
+        self.count = 0
+
+    def poll(self, path) -> int:
+        try:
+            st = os.stat(path)
+        except FileNotFoundError:
+            self.reset()
+            return 0
+        if self._fh is None or self._inode != st.st_ino or st.st_size < self._fh.tell():
+            if self._fh:
+                self._fh.close()
+            self._fh = open(path, "r", errors="replace")
+            self._inode = st.st_ino
+            self.count = 0
+        while True:
+            pos = self._fh.tell()
+            line = self._fh.readline()
+            if not line:
+                break
+            if not line.endswith("\n"):
+                self._fh.seek(pos)
+                break
+            if LATE_DEVICE_WARNING in line:
+                self.count += 1
+        return self.count
+
 
 # --- mnd_property_t ---
 MND_PROPERTY_NAME_STRING = 0
@@ -71,6 +115,8 @@ class MonadoAdapter(VRAdapter):
     def __init__(self):
         self._lib = None
         self._root = None
+        self._options = {"lh_discover_wait_ms": LH_DISCOVER_WAIT_DEFAULT_MS}
+        self._late_devices = _LateDeviceCounter()
 
     def is_available(self) -> bool:
         return ctypes.util.find_library("monado") is not None or self._try_load()
@@ -198,6 +244,7 @@ class MonadoAdapter(VRAdapter):
                     focused=bool(flags.value & MND_CLIENT_SESSION_FOCUSED),
                 ))
 
+            devices.extend(self._late_device_placeholders())
             return BackendSnapshot(self.name, connected=True, devices=devices, clients=clients)
         except Exception as e:
             # The service likely went away mid-poll -- drop our handle so the
@@ -205,7 +252,50 @@ class MonadoAdapter(VRAdapter):
             self._root = None
             return BackendSnapshot(self.name, connected=False, error=str(e))
 
+    def _late_device_placeholders(self) -> list:
+        # Only our own service's log describes the running service; if it
+        # was started some other way, that file is from an older run.
+        if not self.owns_running_service():
+            return []
+        n = self._late_devices.poll(SERVICE_LOG_PATH)
+        return [
+            DeviceStatus(
+                id=f"late-{i}",
+                name="Unidentified lighthouse device",
+                kind=DeviceKind.OTHER,
+                tracking_ok=False,
+                placeholder=True,
+                note=(
+                    "Monado saw this device but it arrived after lighthouse discovery "
+                    "had finished (or was powered on after the service started), so it "
+                    "wasn't added. Monado doesn't log which device it was.\n"
+                    "Increase the lighthouse discovery wait and restart the service."
+                ),
+            )
+            for i in range(n)
+        ]
+
     # ---- service lifecycle: workaround for Monado not handling hotplug ----
+
+    def service_options(self) -> list:
+        return [ServiceOption(
+            key="lh_discover_wait_ms",
+            label="Lighthouse discovery wait",
+            default=LH_DISCOVER_WAIT_DEFAULT_MS,
+            minimum=500,
+            maximum=60000,
+            step=500,
+            suffix=" ms",
+            tooltip=(
+                "How long Monado waits for lighthouse devices (HMD, controllers, trackers, "
+                "base stations) to show up at startup (LH_DISCOVER_WAIT_MS). Devices that "
+                "arrive later are dropped until the next restart."
+            ),
+        )]
+
+    def set_service_option(self, key, value):
+        if key in self._options:
+            self._options[key] = int(value)
 
     def supports_service_restart(self) -> bool:
         return True
@@ -271,10 +361,14 @@ class MonadoAdapter(VRAdapter):
         env["STEAMVR_LH_ENABLE"] = "true"
         env["XRT_COMPOSITOR_USE_PRESENT_WAIT"] = "1"
         env["U_PACING_LIVE_STATS"] = "1"
+        env["LH_DISCOVER_WAIT_MS"] = str(self._options["lh_discover_wait_ms"])
         steamvr_path = _default_steamvr_path()
         if steamvr_path:
             env["STEAMVR_PATH"] = steamvr_path
 
+        # The log is about to be truncated; the new one may outgrow our old
+        # read offset before the next poll, so don't rely on noticing that.
+        self._late_devices.reset()
         try:
             log_f = open(SERVICE_LOG_PATH, "w")
             # stdin=PIPE (left open, never written to) rather than DEVNULL --

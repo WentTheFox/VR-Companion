@@ -1,4 +1,4 @@
-from .base import BackendSnapshot, ClientStatus, DeviceKind, DeviceStatus, VRAdapter
+from .base import BackendSnapshot, ClientStatus, DeviceKind, DeviceStatus, ServiceOption, VRAdapter
 from .monado_adapter import MonadoAdapter
 from .steamvr_adapter import SteamVRAdapter
 from .wivrn_adapter import WiVRnAdapter

@@ -22,6 +22,24 @@ class DeviceStatus:
     battery_percent: Optional[float] = None  # 0-100, None = unsupported/no data
     charging: Optional[bool] = None
     role: Optional[str] = None               # "head", "left", "right", etc.
+    # A device the backend saw but couldn't add (identity unknown) -- shown
+    # as a placeholder row so it isn't silently missing from the list.
+    placeholder: bool = False
+    note: Optional[str] = None
+
+
+@dataclass
+class ServiceOption:
+    """An integer setting passed to the backend's service when it's
+    (re)launched via restart_service(). Rendered generically by the UI."""
+    key: str
+    label: str
+    default: int
+    minimum: int
+    maximum: int
+    step: int = 1
+    suffix: str = ""
+    tooltip: str = ""
 
 
 @dataclass
@@ -77,6 +95,13 @@ class VRAdapter:
         """Stop then relaunch the backend's service. Called from a worker
         thread, not the UI thread -- may block for a few seconds."""
         return False
+
+    def service_options(self) -> list:
+        """list[ServiceOption] this backend's restart_service() honours."""
+        return []
+
+    def set_service_option(self, key: str, value: int):
+        """Takes effect on the next restart_service()."""
 
     def owns_running_service(self) -> bool:
         """Whether the backend's service is currently running as a child of
