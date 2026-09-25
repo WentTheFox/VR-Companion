@@ -39,6 +39,28 @@ def _default_steamvr_path():
 LATE_DEVICE_WARNING = "Cannot add device after setup"
 LH_DISCOVER_WAIT_DEFAULT_MS = 3000
 
+# When no builder recognises a real headset, Monado falls back to its
+# "legacy" builder and hands out this instead -- e.g. when the Index's USB
+# devices failed to enumerate (seen live: its internal hub stuck resetting).
+SIMULATED_HMD_NAME = "Simulated HMD"
+VALVE_USB_VENDOR = "28de"
+INDEX_HMD_USB_PRODUCT = "2300"
+
+
+def _index_hmd_on_usb():
+    """True/False on Linux (via sysfs), None where that can't be checked."""
+    root = Path("/sys/bus/usb/devices")
+    if not root.is_dir():
+        return None
+    for dev in root.iterdir():
+        try:
+            if ((dev / "idVendor").read_text().strip() == VALVE_USB_VENDOR
+                    and (dev / "idProduct").read_text().strip() == INDEX_HMD_USB_PRODUCT):
+                return True
+        except OSError:
+            continue
+    return False
+
 
 class _LateDeviceCounter:
     """Incrementally counts LATE_DEVICE_WARNING lines in the service log."""
@@ -244,13 +266,32 @@ class MonadoAdapter(VRAdapter):
                     focused=bool(flags.value & MND_CLIENT_SESSION_FOCUSED),
                 ))
 
-            devices.extend(self._late_device_placeholders())
-            return BackendSnapshot(self.name, connected=True, devices=devices, clients=clients)
+            late = self._late_device_placeholders()
+            devices.extend(late)
+            return BackendSnapshot(self.name, connected=True, devices=devices, clients=clients,
+                                   warnings=self._warnings(devices, late))
         except Exception as e:
             # The service likely went away mid-poll -- drop our handle so the
             # next poll() call retries connect() from scratch.
             self._root = None
             return BackendSnapshot(self.name, connected=False, error=str(e))
+
+    def _warnings(self, devices, late) -> list:
+        out = []
+        if any(d.role == "head" and d.name == SIMULATED_HMD_NAME for d in devices):
+            msg = ("Monado didn't find your headset and is using a simulated HMD instead, "
+                   "so no real devices (controllers included) will show up.")
+            on_usb = _index_hmd_on_usb()
+            if on_usb is False:
+                msg += (" The Index HMD (USB 28de:2300) isn't connected over USB right now -- "
+                        "power-cycle the link box, then restart the service.")
+            else:
+                msg += " Check the headset's power and USB connection, then restart the service."
+            out.append(msg)
+        if late:
+            out.append(f"{len(late)} device(s) showed up too late to be added (placeholder rows below). "
+                       "Increase the lighthouse discovery wait and restart the service.")
+        return out
 
     def _late_device_placeholders(self) -> list:
         # Only our own service's log describes the running service; if it

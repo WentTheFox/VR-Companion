@@ -57,6 +57,9 @@ class BackendSnapshot:
     devices: list = field(default_factory=list)   # list[DeviceStatus]
     clients: list = field(default_factory=list)    # list[ClientStatus]
     error: Optional[str] = None
+    # Non-fatal problems worth surfacing (e.g. "fell back to a simulated
+    # headset"), shown above the device table.
+    warnings: list = field(default_factory=list)   # list[str]
 
 
 class VRAdapter:

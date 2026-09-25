@@ -140,6 +140,17 @@ testing feedback in the same session; pick this back up fresh here.
 - A late *base station* still yields a placeholder row, but once added it
   doesn't appear in the table (libmonado doesn't expose base stations), so
   the row count can shrink after a fix.
+- **"Simulated HMD" = Monado didn't find the headset.** With no Index on
+  USB, no builder claims a head device and Monado silently falls back to
+  the "legacy" builder's Simulated HMD -- no lighthouse driver, so no
+  controllers and no late-device warnings either. Seen live 2026-09-25: the
+  Index's internal hub (`28de:2613`, sysfs "USB2744") stuck in a reset loop
+  with `28de:2300` HMD + `28de:2102` radios never enumerating; fix is a
+  link-box power-cycle. `MonadoAdapter` now adds a `BackendSnapshot.warnings`
+  entry for this (checking sysfs for `28de:2300` on Linux), shown above the
+  Devices table alongside the late-device warning. Coincided with a
+  monado-git r844 -> r849 upgrade at 14:27, but the USB drop was 16s
+  *earlier* and none of those 5 commits touch builders/steamvr_lh.
 - `/proc/<pid>/environ` of `monado-service` isn't readable (it runs with
   extra capabilities for its realtime threads) -- verify env effects via
   its log instead.

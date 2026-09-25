@@ -87,6 +87,11 @@ class DevicesTab(QWidget):
         self.options_layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.options_box)
 
+        self.warnings_label = QLabel("")
+        self.warnings_label.setWordWrap(True)
+        self.warnings_label.hide()
+        layout.addWidget(self.warnings_label)
+
         self.table = QTableWidget(0, 5)
         self.table.setHorizontalHeaderLabels(["Device", "Kind", "Role", "Tracking", "Battery"])
         self.table.horizontalHeader().setStretchLastSection(True)
@@ -94,13 +99,6 @@ class DevicesTab(QWidget):
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         layout.addWidget(self.table)
 
-        self.late_hint = QLabel(
-            "⚠ Some devices showed up too late to be added (placeholder rows above). "
-            "Increase the discovery wait and restart the service."
-        )
-        self.late_hint.setWordWrap(True)
-        self.late_hint.hide()
-        layout.addWidget(self.late_hint)
 
         self.clients_label = QLabel("Clients: (none)")
         layout.addWidget(self.clients_label)
@@ -223,7 +221,8 @@ class DevicesTab(QWidget):
                     item.setForeground(QBrush(self.palette().color(QPalette.Disabled, QPalette.Text)))
                     item.setToolTip(dev.note or "")
                 self.table.setItem(row, col, item)
-        self.late_hint.setVisible(any(d.placeholder for d in snap.devices))
+        self.warnings_label.setText("\n".join(f"⚠ {w}" for w in snap.warnings))
+        self.warnings_label.setVisible(bool(snap.warnings))
 
         if snap.clients:
             parts = []
