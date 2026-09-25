@@ -25,9 +25,8 @@ def vr_app_clients(snap):
     return [c for c in snap.clients if c.name not in STATUS_CLIENT_NAMES]
 
 
-COLUMNS = ["Device", "Serial", "Kind", "Runtime role", "Body role", "Tracking", "Battery"]
-COL_RUNTIME_ROLE = 3
-COL_BODY_ROLE = 4
+COLUMNS = ["Device", "Serial", "Kind", "Role", "Tracking", "Battery"]
+COL_ROLE = 3
 
 KIND_LABELS = {
     DeviceKind.HMD: "HMD",
@@ -132,16 +131,16 @@ class DevicesTab(QWidget):
 
         self.table = QTableWidget(0, len(COLUMNS))
         self.table.setHorizontalHeaderLabels(COLUMNS)
-        self.table.horizontalHeaderItem(COL_RUNTIME_ROLE).setToolTip(
-            "Role the VR runtime itself assigned (head / left / right hand).")
-        self.table.horizontalHeaderItem(COL_BODY_ROLE).setToolTip(
-            "Body role for trackers, saved per serial number in VR Companion's config.\n"
-            "Same values as SteamVR's \"Manage Trackers\". Monado/xrizer don't pass these\n"
-            "on to games yet, so for now they're for telling your trackers apart.")
+        self.table.horizontalHeaderItem(COL_ROLE).setToolTip(
+            "The role the VR runtime assigned (head / left / right hand), if any.\n"
+            "Otherwise, for trackers: a body role you pick, saved per serial number in\n"
+            "VR Companion's config (same values as SteamVR's \"Manage Trackers\").\n"
+            "Monado/xrizer don't pass body roles on to games yet, so for now they're\n"
+            "for telling your trackers apart.")
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(COL_BODY_ROLE, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(COL_ROLE, QHeaderView.ResizeToContents)
         # Row identity (serial or id) -> live role combo. Kept across refreshes
         # so a periodic poll doesn't close a dropdown the user has open.
         self._row_keys = []
@@ -263,8 +262,10 @@ class DevicesTab(QWidget):
 
     @staticmethod
     def _can_have_body_role(dev):
-        # Needs a serial to persist against.
-        return bool(dev.serial) and not dev.placeholder and dev.kind == DeviceKind.TRACKER
+        # Only where the runtime didn't already assign a role; needs a serial
+        # to persist against.
+        return (bool(dev.serial) and not dev.placeholder and not dev.role
+                and dev.kind == DeviceKind.TRACKER)
 
     def _make_role_combo(self, serial):
         combo = QComboBox()
@@ -355,24 +356,25 @@ class DevicesTab(QWidget):
         self.table.setRowCount(len(snap.devices))
         for row, dev in enumerate(snap.devices):
             if rows_changed:
-                self.table.removeCellWidget(row, COL_BODY_ROLE)
+                self.table.removeCellWidget(row, COL_ROLE)
                 if self._can_have_body_role(dev):
-                    self.table.setCellWidget(row, COL_BODY_ROLE, self._make_role_combo(dev.serial))
+                    self.table.setCellWidget(row, COL_ROLE, self._make_role_combo(dev.serial))
             if dev.placeholder:
                 kind = KIND_LABELS.get(dev.kind, "?") if dev.kind != DeviceKind.OTHER else "?"
                 # Read-only role text: e.g. shows which tracker (Waist, ...) has
                 # already been found while discovery is still running.
                 role = get_role(self.cfg, dev.serial) if dev.serial and dev.kind == DeviceKind.TRACKER else NO_ROLE
                 role_text = ROLE_LABELS[role] if role != NO_ROLE else ""
-                cells = [dev.name, dev.serial or "?", kind, "", role_text, dev.placeholder_status or "", "--"]
+                cells = [dev.name, dev.serial or "?", kind, role_text, dev.placeholder_status or "", "--"]
             else:
                 tracking = "OK" if dev.tracking_ok else ("--" if dev.tracking_ok is None else "Lost")
                 if dev.battery_percent is not None:
                     batt = f"{dev.battery_percent:.0f}%" + (" (charging)" if dev.charging else "")
                 else:
                     batt = "--"
+                # A body-role combo covers the Role cell when the runtime left it empty.
                 cells = [dev.name, dev.serial or "--", KIND_LABELS.get(dev.kind, "?"), dev.role or "",
-                         "", tracking, batt]
+                         tracking, batt]
             for col, text in enumerate(cells):
                 item = QTableWidgetItem(text)
                 if dev.placeholder:
@@ -383,7 +385,7 @@ class DevicesTab(QWidget):
                     item.setToolTip(dev.note or "")
                 self.table.setItem(row, col, item)
         if rows_changed:
-            self.table.resizeColumnToContents(COL_BODY_ROLE)
+            self.table.resizeColumnToContents(COL_ROLE)
         self.warnings_label.setText("\n".join(f"⚠ {w}" for w in snap.warnings))
         self.warnings_label.setVisible(bool(snap.warnings))
 

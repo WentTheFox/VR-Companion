@@ -188,7 +188,7 @@ testing feedback in the same session; pick this back up fresh here.
   trackers as generic `vive_tracker_handheld_object` and its IVRSettings is
   a stub; Monado's new built-in OpenVR state tracker (MR 2862) is also
   role-less. VRChat doesn't need roles (calibration assigns by position).
-  So the Devices tab's "Body role" column (trackers only; `roles.py`, saved per serial in
+  So the Devices tab's body-role dropdown (in the merged "Role" column, only for trackers the runtime gave no role; `roles.py`, saved per serial in
   `cfg["device_roles"]`, keyed by SteamVR's `TrackerRole_*` names) is
   informational for now. Getting roles to games would mean patching xrizer
   to read that mapping and report e.g. `vive_tracker_waist`.
