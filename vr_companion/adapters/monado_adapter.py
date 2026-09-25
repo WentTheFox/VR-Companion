@@ -62,6 +62,11 @@ def _classify(name: str, role: str | None) -> DeviceKind:
 
 class MonadoAdapter(VRAdapter):
     name = "Monado"
+    # monado-service we launched, if any. Class-level on purpose: the UI
+    # replaces its adapter instance on a backend switch, and letting this
+    # Popen get garbage-collected would close the service's stdin pipe --
+    # which shuts the service down.
+    _service_proc = None
 
     def __init__(self):
         self._lib = None
@@ -208,8 +213,10 @@ class MonadoAdapter(VRAdapter):
     def _find_running_pid(self):
         try:
             pid = int(PIDFILE_PATH.read_text().strip())
-            os.kill(pid, 0)  # raises if it doesn't exist
-            return pid
+            # The pidfile outlives a crashed service, and its PID can be reused
+            # by an unrelated process -- only trust it if it's still monado.
+            if Path(f"/proc/{pid}/comm").read_text().strip() == "monado-service":
+                return pid
         except (FileNotFoundError, ValueError, ProcessLookupError, PermissionError):
             pass
         try:
@@ -229,6 +236,16 @@ class MonadoAdapter(VRAdapter):
         try:
             os.kill(pid, signal.SIGTERM)
         except ProcessLookupError:
+            return
+        own = MonadoAdapter._service_proc
+        if own is not None and own.pid == pid:
+            # Our own child: it stays a zombie (still "alive" to kill(pid, 0))
+            # until reaped, so wait() on it rather than polling.
+            try:
+                own.wait(timeout=timeout_s)
+            except subprocess.TimeoutExpired:
+                own.kill()
+                own.wait()
             return
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
@@ -262,7 +279,7 @@ class MonadoAdapter(VRAdapter):
             log_f = open(SERVICE_LOG_PATH, "w")
             # stdin=PIPE (left open, never written to) rather than DEVNULL --
             # monado-service's epoll(stdin) setup fails against /dev/null.
-            subprocess.Popen(
+            MonadoAdapter._service_proc = subprocess.Popen(
                 ["/usr/bin/monado-service"],
                 env=env,
                 stdin=subprocess.PIPE,
@@ -274,6 +291,12 @@ class MonadoAdapter(VRAdapter):
             print(f"vr-companion: failed to launch monado-service: {e}")
             return False
         return True
+
+    def owns_running_service(self) -> bool:
+        # Our child's stdin is a pipe held by this process; monado-service
+        # shuts down as soon as it closes, i.e. when this app exits.
+        proc = MonadoAdapter._service_proc
+        return proc is not None and proc.poll() is None
 
     # ---- performance graph data ----
 

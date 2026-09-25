@@ -1,10 +1,11 @@
 import sys
 
 from PySide6.QtGui import QAction, QIcon, QPixmap, QPainter, QColor
-from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
+from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon
 
 from .audio.engine import NoiseEngine
 from .config import load_config, save_config
+from .ui.devices_tab import vr_app_clients
 from .ui.main_window import MainWindow
 
 
@@ -41,6 +42,19 @@ def main():
     quit_action = QAction("Quit")
 
     def do_quit():
+        devices = window.devices_tab
+        if devices.adapter.owns_running_service():
+            apps = vr_app_clients(devices.last_snapshot)
+            msg = f"Quitting also stops the {devices.adapter.name} service this app started."
+            if apps:
+                msg += (
+                    "\n\nThese VR apps are connected and will lose their session "
+                    "(most likely crash):\n" + "\n".join(f"  • {c.name}" for c in apps)
+                )
+            window.show()
+            window.raise_()
+            if QMessageBox.question(window, "Quit VR Companion", msg + "\n\nQuit anyway?") != QMessageBox.Yes:
+                return
         engine.shutdown()
         app.quit()
 

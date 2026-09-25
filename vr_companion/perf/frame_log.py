@@ -41,8 +41,11 @@ class FrameTimingTailer:
             st = os.stat(self.path)
         except FileNotFoundError:
             return False
-        if self._fh is None or self._inode != st.st_ino:
-            # File changed (service restarted, log truncated/replaced) -- reopen from the top.
+        truncated = self._fh is not None and st.st_size < self._fh.tell()
+        if self._fh is None or self._inode != st.st_ino or truncated:
+            # File changed (service restarted, log truncated/replaced) -- reopen
+            # from the top. restart_service() truncates in place with "w", which
+            # keeps the same inode, hence the size check too.
             if self._fh:
                 self._fh.close()
             self._fh = open(self.path, "r", errors="replace")
@@ -58,7 +61,17 @@ class FrameTimingTailer:
             return []
 
         samples = []
-        for line in self._fh:
+        while True:
+            # readline() rather than iterating the file: iteration disables
+            # tell(), which the truncation check above depends on.
+            pos = self._fh.tell()
+            line = self._fh.readline()
+            if not line:
+                break
+            if not line.endswith("\n"):
+                # Writer is mid-line -- rewind and pick it up whole next poll.
+                self._fh.seek(pos)
+                break
             if BLOCK_START.search(line):
                 self._in_block = True
                 self._pending = FrameTimingSample()

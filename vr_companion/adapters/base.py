@@ -78,6 +78,11 @@ class VRAdapter:
         thread, not the UI thread -- may block for a few seconds."""
         return False
 
+    def owns_running_service(self) -> bool:
+        """Whether the backend's service is currently running as a child of
+        this app -- i.e. quitting the app will also stop it."""
+        return False
+
     def supports_frame_timing(self) -> bool:
         """Whether get_frame_timing_log_path() returns something parseable."""
         return False

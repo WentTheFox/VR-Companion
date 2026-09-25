@@ -51,68 +51,85 @@ testing feedback in the same session; pick this back up fresh here.
   close rather than quitting), `QTimer`-driven polling (2s) for both the
   devices tab and the audio engine's device-presence check.
 
-## What's built but NOT yet wired into the UI (do this first)
+## Restart button + performance graph (wired in 2026-09-25, second session)
 
-- `adapters/base.py` gained four new optional-capability methods:
+- `adapters/base.py` has four optional-capability methods:
   `supports_service_restart()` / `restart_service()` and
   `supports_frame_timing()` / `get_frame_timing_log_path()`.
 - `MonadoAdapter` implements all four for real:
   - `restart_service()`: finds & stops any running `monado-service` (via
     `/run/user/<uid>/monado.pid`, falling back to `pgrep -x`), SIGTERM then
     SIGKILL after an 8s timeout (this build has repeatedly been slow/stuck
-    exiting after a display drop -- confirmed multiple times today), then
-    relaunches it with a known-good env (see the module for exactly which
-    vars and why each one is there -- worked out over hours of live testing
-    today, don't re-derive it from scratch).
+    exiting after a display drop), then relaunches it with a known-good env
+    (see the module for exactly which vars and why each one is there --
+    worked out over hours of live testing, don't re-derive it from scratch).
   - `get_frame_timing_log_path()` points at
     `~/.local/state/vr-companion/monado-service.log`, which
     `restart_service()` sets `monado-service` to write to (with
     `U_PACING_LIVE_STATS=1` in its env), truncated fresh on each restart.
-- `vr_companion/perf/frame_log.py`: `FrameTimingTailer` incrementally parses
-  that log's periodic "Compositor frame timing:" blocks (median/mean/worst
-  per pipeline stage: cpu/draw/submit/gpu/gpu_delay/total_frame) into
-  `FrameTimingSample` objects. Handles the log file being replaced/truncated
-  across a restart (compares inode, reopens from the top).
+    It returns None until the first restart via this app creates the file.
+- `perf/frame_log.py`: `FrameTimingTailer` incrementally parses that log's
+  "Compositor frame timing:" blocks into `FrameTimingSample`s. Reopens on
+  inode change *or* in-place truncation (file smaller than read offset --
+  `restart_service()` opens with `"w"`, which keeps the inode). Uses
+  `readline()` + `tell()` rather than file iteration (iteration disables
+  `tell()`), and rewinds over a half-written trailing line.
+- `ui/devices_tab.py`: "Restart service" button, visible only when
+  `adapter.supports_service_restart()`. Confirms first via a dialog that
+  warns connected VR apps will crash (lists current clients). Runs
+  `restart_service()` in a `RestartWorker` QObject on a `QThread`;
+  `refresh()` is skipped while it runs so the UI-thread poll doesn't race the
+  worker on the same adapter. Emits `adapter_changed` / `service_restarted`.
+- `ui/performance_tab.py`: hand-painted rolling bar graph (no new
+  dependency) of `total_frame` -- solid bar to median, faded to worst,
+  red when the median exceeds the chosen budget (80/90/120/144 Hz picker,
+  default 90, not persisted). Table below shows median/mean/worst for all
+  stages from the latest sample. Polled every 500ms from `MainWindow`.
+  Shows a message page instead when the backend lacks frame timing or no
+  log exists yet. Resets its tailer + history on `service_restarted`.
+- Verified only headless (`QT_QPA_PLATFORM=offscreen`, fake adapter + synthetic
+  log): restart thread round-trip, button visibility per backend, tailer
+  truncation/partial-line handling, graph render. **Not yet run against a
+  real `monado-service`.**
 
 **Still to do**, roughly in order:
-1. `ui/devices_tab.py`: add a "Restart service" button, shown only when
-   `adapter.supports_service_restart()`. Must run `restart_service()` on a
-   background thread (it blocks for up to several seconds) -- use a
-   `QThread`/worker-with-signal pattern, not a raw Python thread touching
-   Qt widgets directly. Disable the button and show a status message while
-   in progress; re-enable + trigger a `refresh()` on completion.
-2. `ui/performance_tab.py` (new file): a live frame-timing graph, styled
-   like SteamVR's. No graphing library is installed (no pyqtgraph/
-   matplotlib) -- either add one or (leaning towards this, no new
-   dependency) paint a rolling bar/line graph manually in a `QWidget`
-   subclass's `paintEvent`, fed by a `QTimer` calling
-   `FrameTimingTailer.poll_new_samples()` every ~500ms. Show current
-   median/mean/worst numerically too. Gate on
-   `adapter.supports_frame_timing()`; show a plain "not available for this
-   backend" message otherwise.
-3. Wire both into `ui/main_window.py` as additional tabs.
-4. **Live test with the real headset** (this is what got deferred): launch
-   `python3 -m vr_companion.app` from
-   `/home/went/.local/share/vr-companion`, with the Index/base
-   stations/controllers powered on, and check the Devices tab against real
-   hardware (it's only been tested against an empty/disconnected state so
-   far), plus exercise the restart button around an actual power-cycle.
-5. Retire `~/.local/share/vr-noise-mask/vr_noise_mask.py` (the old
-   standalone tray app) for real -- currently just stopped, not deleted,
-   in case anything needs to be diffed against it.
-6. systemd autostart wiring was asked for early on but not done: the user
-   wants it tied to `monado.service` (a user-level systemd unit, socket-
-   activated, "indirect" state) via a drop-in
-   (`~/.config/systemd/user/monado.service.d/*.conf`), never editing the
-   package's own unit file. Given this app now manages `monado-service`'s
-   lifecycle itself via `restart_service()`, reconsider whether a systemd
-   trigger is even still wanted, or whether "launch vr-companion, hit
-   Restart" replaces that need -- ask the user, don't just build it blind.
+4. **Live test, partly done 2026-09-25:** `restart_service()` + Devices
+   poll verified against the real Index: HMD + both Knuckles (with battery)
+   listed within ~6s of launch. Still unverified: the Performance tab with
+   real data (Monado only emits "Compositor frame timing" blocks while an
+   OpenXR app is actually rendering -- none were, so the log had none), and
+   Restart around a real headset power-cycle. Launch with
+   `python3 -m vr_companion.app` from the repo root
+   (`~/git/WentTheFox/VR-Companion`; the old `~/.local/share/vr-companion`
+   location no longer exists), start a VR app, then check both.
+5. Retire the old standalone app: its config was confirmed identical to
+   the migrated one and nothing references it (no autostart/systemd/
+   .desktop entry), but deleting it was blocked by Claude Code's auto-mode
+   permission check -- the user needs to run
+   `rm -r ~/.local/share/vr-noise-mask ~/.config/vr-noise-mask` themselves.
+6. ~~systemd autostart~~ -- dropped: the user is happy for the companion
+   app to own `monado-service` (see Design decisions), so there's no
+   separate always-running service to autostart.
 7. Real `SteamVRAdapter` / `WiVRnAdapter` implementations, and Windows-side
    testing (this whole app was scoped as cross-platform; only ever run on
    Linux so far).
 
 ## Gotchas worth not re-discovering the hard way
+
+- **`/run/user/<uid>/monado.pid` outlives a crashed service** (and so does
+  the `monado_comp_ipc` socket file). `_find_running_pid()` only trusts the
+  pidfile if `/proc/<pid>/comm` is `monado-service`, so a reused PID can't
+  get an unrelated process killed. Don't simplify that back to `kill(pid, 0)`.
+- libmonado's client list includes every **status-only libmonado client**
+  (this app's own poll, and the user's separate `vr-ha-agent`), each shown
+  as `libmonado`. They aren't VR apps and won't crash on restart.
+- Base stations are found by Monado (visible in the service log) but are
+  not exposed as devices through libmonado, so they never appear in the
+  Devices table.
+- Seen once live: `Cannot add device after setup; consider increasing
+  LH_DISCOVER_WAIT_MS` -- one lighthouse device showed up after the
+  discovery window (4 Watchman dongles, only 2 controllers). Unknown which;
+  if a tracker goes missing, try setting that var in `restart_service()`.
 
 - **Never open the raw ALSA hw device for the headset directly** (e.g.
   `hw:NVidia,7`, which is what PortAudio's device enumeration calls
@@ -150,6 +167,21 @@ testing feedback in the same session; pick this back up fresh here.
   than parsing plain-text `pactl list` output.
 
 ## Design decisions already made with the user (don't re-litigate)
+
+- **VR Companion owns `monado-service`'s lifetime.** A service started by
+  `restart_service()` gets its stdin from a pipe held by this process, and
+  shuts down cleanly as soon as that pipe closes -- i.e. quitting (or
+  crashing) VR Companion stops the service and any connected VR app.
+  Confirmed live 2026-09-25 and explicitly accepted by the user ("one less
+  thing running in the background"). Don't detach it (e.g. a
+  `sleep infinity` stdin feeder) without asking first.
+  Supporting pieces: `MonadoAdapter._service_proc` is **class-level** (a
+  backend switch replaces the adapter instance; a GC'd Popen would close
+  the pipe and stop the service), `owns_running_service()` exposes it, and
+  the tray's Quit asks for confirmation when it's true, listing connected
+  VR apps (`vr_app_clients()` filters out `libmonado` status connections).
+  `_stop_running_service()` reaps our own child with `wait()` -- polling
+  `kill(pid, 0)` on an unreaped zombie would always hit the 8s SIGKILL path.
 
 - Pluggable adapters for Monado/SteamVR/WiVRn, explicitly because the user
   doesn't want to hard-code one backend.
